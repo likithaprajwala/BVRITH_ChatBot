@@ -190,7 +190,38 @@ All configuration is managed via the `.env` file:
 
 ## 🖼️ Screenshots
 
-*(Screenshots placeholder — add your own after running the app)*
+### 🏠 Home Page
+The landing page shows key stats — documents indexed, chunk count, RAGAS score, and pass rate — along with quick navigation to the Chat and Eval tabs.
+
+![Home Page](chatbot%20images/1.jpeg)
+
+---
+
+### 💬 Chat Interface — Welcome State
+The Chat tab with the BVRITH Assistant ready to answer questions. The sidebar shows knowledge base info (document, chunks, status) and retrieval config. Quick-access topic buttons (About, Departments, Admissions, Fee Structure, etc.) help users get started.
+
+![Chat Interface Welcome](chatbot%20images/2.jpeg)
+
+---
+
+### 💬 Chat Interface — Active Conversation
+A sample conversation showing the chatbot answering "What is the fee structure for B.Tech?" with a cited, grounded response pulled from the official document. Each answer includes section citations and retrieval metadata (response time, chunks used).
+
+![Chat Interface Active](chatbot%20images/3.jpeg)
+
+---
+
+### 📊 Evaluation Dashboard
+The Eval tab displays a comprehensive evaluation summary across 8 dimensions — 20 total test cases, 15 passed, 5 failed, 75% pass rate. RAGAS metrics (Faithfulness: 0.70, Answer Relevancy: 0.90, Context Precision: 0.80, Context Recall: 0.70) are shown alongside the weakest dimension breakdown.
+
+![Evaluation Dashboard](chatbot%20images/4.jpeg)
+
+---
+
+### ❌ Failed Test Drill-Downs
+Detailed drill-down view of failed test cases showing the question, expected vs. actual answer, score, and root cause analysis — useful for identifying gaps in retrieval and prompt engineering.
+
+![Failed Test Drill-Downs](chatbot%20images/5.jpeg)
 
 ---
 
@@ -206,10 +237,6 @@ All configuration is managed via the `.env` file:
 - **Advanced RAGAS** — Full RAGAS library integration with `datasets`.
 
 ---
-
-## 📝 License
-
-This project is for educational and demonstration purposes.
 
 ## 🙏 Acknowledgements
 

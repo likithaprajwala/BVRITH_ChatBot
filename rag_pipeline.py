@@ -1,10 +1,12 @@
 """
 RAG Pipeline for BVRIT College Chatbot.
 
-Handles retrieval, prompt formatting, and LLM interaction.
+Handles query intent detection, section-aware retrieval, chunk merging,
+prompt formatting, and LLM interaction.
 """
 
 import os
+import re
 import time
 import json
 import logging
@@ -12,7 +14,6 @@ from typing import Dict, List, Optional, Tuple, Any
 
 from dotenv import load_dotenv
 from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import OpenAIEmbeddings
 from openai import OpenAI
 
 from build_index import (
@@ -27,31 +28,104 @@ from build_index import (
 )
 from prompts import format_system_prompt, SYSTEM_PROMPT, JUDGE_SYSTEM_PROMPT
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# LLM Configuration
 LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
+# ── Intent Detection ──────────────────────────────────────────────────────────
+# Maps detected intent → AVAILABLE_SECTIONS value
+_INTENT_MAP: Dict[str, str] = {
+    "about":        "About",
+    "departments":  "Departments",
+    "admissions":   "Admissions",
+    "fee":          "Fee Structure",
+    "placements":   "Placements",
+    "facilities":   "Facilities",
+    "faculty":      "Faculty",
+    "contact":      "Contact",
+}
+
+# Keyword patterns per intent (checked against lower-cased query)
+_INTENT_KEYWORDS: Dict[str, List[str]] = {
+    "about": [
+        "about bvrit", "about the college", "overview", "history",
+        "established", "founded", "vision", "mission", "introduction",
+        "what is bvrit", "tell me about bvrit",
+    ],
+    "departments": [
+        "department", "departments", "branch", "branches", "program",
+        "programmes", "courses offered", "b.tech", "btech", "m.tech",
+        "mtech", "cse", "ece", "eee", "it ", " it,", "civil", "mba",
+        "what do you offer", "what programs",
+    ],
+    "admissions": [
+        "admission", "admissions", "how to apply", "apply", "eligibility",
+        "entrance", "eamcet", "tseamcet", "jee", "seat", "intake",
+        "application process", "admission process",
+    ],
+    "fee": [
+        "fee", "fees", "fee structure", "tuition", "cost", "how much",
+        "payment", "charges", "annual fee", "semester fee",
+    ],
+    "placements": [
+        "placement", "placements", "job", "recruit", "company", "companies",
+        "package", "salary", "lpa", "ctc", "campus", "placed", "hiring",
+        "career", "offer", "highest package",
+    ],
+    "facilities": [
+        "facilit", "library", "lab", "hostel", "cafeteria", "canteen",
+        "transport", "sports", "gym", "wifi", "internet", "infrastructure",
+        "yoga", "wellness", "amenities",
+    ],
+    "faculty": [
+        "faculty", "professor", "teacher", "staff", "lecturer",
+        "phd", "principal", "hod", "head of department",
+    ],
+    "contact": [
+        "contact", "address", "phone", "email", "website", "location",
+        "how to reach", "where is bvrit", "map",
+    ],
+}
+
+# Queries that are clearly broad (need all chunks from a section)
+_BROAD_QUERY_PATTERNS = re.compile(
+    r"\b(all|list|every|complete|full|details?|tell me about|what are|"
+    r"what is the|explain|describe|overview|summary)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_intent(query: str) -> Optional[str]:
+    """
+    Detect which BVRIT section the query is about.
+
+    Returns the AVAILABLE_SECTIONS value (e.g. 'Departments') or None.
+    """
+    q = query.lower()
+    for intent, keywords in _INTENT_KEYWORDS.items():
+        for kw in keywords:
+            if kw in q:
+                return _INTENT_MAP[intent]
+    return None
+
+
+def is_broad_query(query: str) -> bool:
+    """Return True if the query is broad enough to warrant fetching more chunks."""
+    return bool(_BROAD_QUERY_PATTERNS.search(query)) or len(query.split()) <= 6
+
+
+# ── RAG Pipeline ─────────────────────────────────────────────────────────────
 
 class RAGPipeline:
     """
     Retrieval-Augmented Generation pipeline for BVRIT College Q&A.
+    Includes query intent detection, section-aware retrieval, and chunk merging.
     """
 
     def __init__(self, top_k: int = TOP_K) -> None:
-        """
-        Initialize the RAG pipeline with vector store and LLM client.
-
-        Args:
-            top_k: Number of documents to retrieve.
-        """
         self.top_k: int = top_k
         self.vector_store: Chroma = get_vector_store()
         self.llm_client: OpenAI = OpenAI(
@@ -61,6 +135,8 @@ class RAGPipeline:
         self.llm_model: str = LLM_MODEL
         logger.info(f"RAGPipeline initialized with top_k={top_k}, model={LLM_MODEL}")
 
+    # ── Retrieval ─────────────────────────────────────────────────────────────
+
     def retrieve(
         self,
         query: str,
@@ -68,90 +144,105 @@ class RAGPipeline:
         top_k: Optional[int] = None,
     ) -> Tuple[List[Any], List[Dict[str, Any]], List[float]]:
         """
-        Retrieve relevant documents from the vector store.
+        Smart retrieval with intent detection and section-aware fetching.
 
-        Args:
-            query: The user's question.
-            section: Optional section filter.
-            top_k: Number of documents to retrieve (overrides default).
-
-        Returns:
-            Tuple of (retrieved_documents, metadata_list, score_list).
+        1. Detect query intent → infer section if not provided by user.
+        2. If broad query about a section, fetch all chunks from that section.
+        3. Merge duplicate/near-duplicate content from the same section.
+        4. Fall back to standard semantic search if no section detected.
         """
         k = top_k if top_k is not None else self.top_k
 
-        logger.info(f"Retrieving for query: '{query[:50]}...' with top_k={k}")
+        # Step 1 — Resolve section: explicit filter > intent detection
+        detected_section = section if (section and section in AVAILABLE_SECTIONS) else detect_intent(query)
+        broad = is_broad_query(query)
 
-        if section and section in AVAILABLE_SECTIONS:
-            logger.info(f"Filtering by section: {section}")
-            # Use ChromaDB's metadata filtering
-            results = self.vector_store.similarity_search_with_score(
-                query,
-                k=k * 2,  # Fetch more to filter
-                filter={"section": section},
-            )
+        logger.info(
+            f"Retrieving: section={detected_section}, broad={broad}, top_k={k}"
+        )
+
+        results: List[Tuple[Any, float]] = []
+
+        if detected_section:
+            # Increase k for broad questions about a specific section
+            fetch_k = max(k * 2, 8) if broad else k + 2
+            try:
+                results = self.vector_store.similarity_search_with_score(
+                    query,
+                    k=fetch_k,
+                    filter={"section": detected_section},
+                )
+                logger.info(
+                    f"Section-filtered retrieval [{detected_section}]: {len(results)} chunks"
+                )
+            except Exception as e:
+                logger.warning(f"Section filter failed ({e}), falling back to unfiltered")
+                results = []
+
+            # If section filter returns too few results, supplement with unfiltered
+            if len(results) < 3:
+                extra = self.vector_store.similarity_search_with_score(query, k=k)
+                # Merge: avoid duplicates by page_content
+                seen = {doc.page_content for doc, _ in results}
+                for doc, score in extra:
+                    if doc.page_content not in seen:
+                        results.append((doc, score))
+                        seen.add(doc.page_content)
         else:
-            results = self.vector_store.similarity_search_with_score(
-                query,
-                k=k,
-            )
+            # No section detected → standard semantic search
+            results = self.vector_store.similarity_search_with_score(query, k=k)
 
-        # If no results with filter, fall back to unfiltered
-        if not results and section:
-            logger.warning(f"No results with section '{section}', falling back to unfiltered")
-            results = self.vector_store.similarity_search_with_score(
-                query,
-                k=k,
-            )
+        # Deduplicate by content prefix (first 100 chars)
+        seen_prefixes: set = set()
+        deduped: List[Tuple[Any, float]] = []
+        for doc, score in results:
+            prefix = doc.page_content[:100].strip()
+            if prefix not in seen_prefixes:
+                deduped.append((doc, score))
+                seen_prefixes.add(prefix)
 
-        # Limit to top_k
-        results = results[:k]
+        # Cap at reasonable limit to avoid token overflow
+        max_chunks = min(len(deduped), 8 if broad else k)
+        deduped = deduped[:max_chunks]
 
-        documents = [doc for doc, _ in results]
-        metadata_list = [doc.metadata for doc, _ in results]
-        scores = [float(score) for _, score in results]
+        documents = [doc for doc, _ in deduped]
+        metadata_list = [doc.metadata for doc, _ in deduped]
+        scores = [float(s) for _, s in deduped]
 
-        logger.info(f"Retrieved {len(documents)} documents")
+        logger.info(f"Final retrieved chunks: {len(documents)}")
         return documents, metadata_list, scores
+
+    # ── Context Formatting ────────────────────────────────────────────────────
 
     def format_context(self, documents: List[Any]) -> str:
         """
-        Format retrieved documents into a context string for the prompt.
-
-        Args:
-            documents: List of retrieved Document objects.
-
-        Returns:
-            Formatted context string with citations.
+        Format retrieved docs into context string.
+        Groups chunks by section and merges them for clarity.
         """
-        context_parts = []
-        for i, doc in enumerate(documents):
-            section = doc.metadata.get("section", "Unknown")
-            source = doc.metadata.get("source", "Unknown")
-            context_parts.append(
-                f"[Document {i + 1}] (Source: {source}, Section: {section})\n"
-                f"{doc.page_content}\n"
-            )
-        return "\n---\n".join(context_parts)
+        # Group by section
+        sections: Dict[str, List[str]] = {}
+        for doc in documents:
+            sec = doc.metadata.get("section", "General")
+            sections.setdefault(sec, []).append(doc.page_content.strip())
+
+        parts = []
+        for sec, contents in sections.items():
+            merged = "\n\n".join(contents)
+            parts.append(f"[Section: {sec}]\n{merged}")
+
+        return "\n\n---\n\n".join(parts)
 
     def format_chat_history(self, history: List[Tuple[str, str]]) -> str:
-        """
-        Format conversation history for the prompt.
-
-        Args:
-            history: List of (user_message, assistant_response) tuples.
-
-        Returns:
-            Formatted chat history string.
-        """
+        """Format last 5 conversation turns."""
         if not history:
             return "No previous conversation."
+        lines = []
+        for user_msg, assistant_msg in history[-5:]:
+            lines.append(f"User: {user_msg}")
+            lines.append(f"Assistant: {assistant_msg}")
+        return "\n".join(lines)
 
-        formatted = []
-        for user_msg, assistant_msg in history[-5:]:  # Last 5 turns
-            formatted.append(f"User: {user_msg}")
-            formatted.append(f"Assistant: {assistant_msg}")
-        return "\n".join(formatted)
+    # ── Generation ────────────────────────────────────────────────────────────
 
     def generate(
         self,
@@ -159,24 +250,12 @@ class RAGPipeline:
         documents: List[Any],
         chat_history: Optional[List[Tuple[str, str]]] = None,
     ) -> str:
-        """
-        Generate an answer using the LLM based on retrieved context.
-
-        Args:
-            question: The user's question.
-            documents: Retrieved document chunks.
-            chat_history: Previous conversation history.
-
-        Returns:
-            Generated answer string.
-        """
+        """Generate answer from LLM using retrieved context."""
         context = self.format_context(documents)
         history_str = self.format_chat_history(chat_history or [])
-
         prompt = format_system_prompt(context, history_str, question)
 
-        logger.info(f"Generating answer for question: '{question[:50]}...'")
-
+        logger.info(f"Generating answer for: '{question[:60]}'")
         try:
             response = self.llm_client.chat.completions.create(
                 model=self.llm_model,
@@ -185,14 +264,19 @@ class RAGPipeline:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,
-                max_tokens=1024,
+                max_tokens=600,
             )
             answer = response.choices[0].message.content.strip()
-            logger.info(f"Generated answer of length {len(answer)}")
+            logger.info(f"Generated {len(answer)} chars")
             return answer
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")
-            return f"I encountered an error while generating a response. Please try again later. (Error: {str(e)})"
+            return (
+                f"I encountered an error while generating a response. "
+                f"Please try again later. (Error: {str(e)})"
+            )
+
+    # ── Full Query ────────────────────────────────────────────────────────────
 
     def query(
         self,
@@ -201,41 +285,26 @@ class RAGPipeline:
         chat_history: Optional[List[Tuple[str, str]]] = None,
         top_k: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """
-        Complete RAG query: retrieve + generate.
-
-        Args:
-            question: The user's question.
-            section: Optional section filter.
-            chat_history: Previous conversation history.
-            top_k: Number of documents to retrieve.
-
-        Returns:
-            Dictionary with answer, citations, metadata, and performance metrics.
-        """
+        """Complete RAG query: detect intent → retrieve → generate."""
         start_time = time.time()
 
-        # Retrieve
         documents, metadata_list, scores = self.retrieve(question, section, top_k)
-
-        # Generate
         answer = self.generate(question, documents, chat_history)
 
-        # Extract citations from answer
         citations = self.extract_citations(answer)
         if not citations and documents:
-            citations = [doc.metadata.get("section", "Unknown") for doc in documents]
+            citations = list({doc.metadata.get("section", "Unknown") for doc in documents})
 
         latency = time.time() - start_time
 
-        result = {
+        result: Dict[str, Any] = {
             "answer": answer,
             "citations": list(set(citations)),
             "retrieved_chunk_count": len(documents),
             "latency": round(latency, 3),
-            "retrieved_sections": list(set(
+            "retrieved_sections": list({
                 doc.metadata.get("section", "Unknown") for doc in documents
-            )),
+            }),
             "retrieved_chunks": [
                 {
                     "content": doc.page_content[:200] + "...",
@@ -244,40 +313,31 @@ class RAGPipeline:
                 }
                 for doc, score in zip(documents, scores)
             ],
+            "is_refusal": (
+                "couldn't find" in answer.lower()
+                or "could not find" in answer.lower()
+                or "i don't have" in answer.lower()
+            ),
         }
 
-        # Check if it's a refusal
-        if "could not find that information" in answer.lower():
-            result["is_refusal"] = True
-        else:
-            result["is_refusal"] = False
-
-        logger.info(f"Query completed in {latency:.2f}s with {len(documents)} chunks")
+        logger.info(f"Query done in {latency:.2f}s, {len(documents)} chunks")
         return result
 
     @staticmethod
     def extract_citations(answer: str) -> List[str]:
-        """
-        Extract citation section names from an answer.
+        """Extract **[Section]** and [Section | Page] style citations."""
+        hits = re.findall(r'\*\*\[([^\]]+)\]\*\*', answer)
+        hits += re.findall(r'\[([^\]|]+?)(?:\s*\|\s*[^\]]+)?\]', answer)
+        # Filter out numeric-only matches (page refs)
+        return [h.strip() for h in hits if not h.strip().isdigit()]
 
-        Args:
-            answer: The generated answer text.
 
-        Returns:
-            List of cited section names.
-        """
-        import re
-        citations = re.findall(r'\*\*\[(.*?)\]\*\*', answer)
-        return citations
-
+# ── LLM Judge ─────────────────────────────────────────────────────────────────
 
 class LLMJudge:
-    """
-    LLM-based evaluator for RAG responses.
-    """
+    """LLM-based evaluator for RAG responses."""
 
     def __init__(self) -> None:
-        """Initialize the LLM Judge with OpenRouter client."""
         self.llm_client: OpenAI = OpenAI(
             api_key=OPENROUTER_API_KEY,
             base_url=OPENROUTER_BASE_URL,
@@ -292,25 +352,10 @@ class LLMJudge:
         dimension: str,
         retrieved_chunks: str,
     ) -> Dict[str, Any]:
-        """
-        Evaluate a test case using the LLM Judge.
-
-        Args:
-            question: The test question.
-            expected_answer: The expected answer.
-            actual_answer: The actual answer from the RAG system.
-            dimension: The evaluation dimension.
-            retrieved_chunks: The retrieved context chunks.
-
-        Returns:
-            Dictionary with pass, reason, and score.
-        """
         from prompts import format_judge_prompt
-
         prompt = format_judge_prompt(
             question, expected_answer, actual_answer, dimension, retrieved_chunks
         )
-
         try:
             response = self.llm_client.chat.completions.create(
                 model=self.llm_model,
@@ -319,52 +364,31 @@ class LLMJudge:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.0,
-                max_tokens=512,
+                max_tokens=400,
             )
-            result_text = response.choices[0].message.content.strip()
-
-            # Parse JSON from response
-            result = self._parse_json(result_text)
-            return result
+            return self._parse_json(response.choices[0].message.content.strip())
         except Exception as e:
             logger.error(f"Judge evaluation failed: {e}")
-            return {
-                "pass": False,
-                "reason": f"Judge evaluation error: {str(e)}",
-                "score": 0,
-            }
+            return {"pass": False, "reason": f"Judge error: {str(e)}", "score": 0}
 
     @staticmethod
     def _parse_json(text: str) -> Dict[str, Any]:
-        """
-        Parse JSON from LLM response, handling potential markdown code blocks.
-
-        Args:
-            text: Text potentially containing JSON.
-
-        Returns:
-            Parsed JSON dictionary.
-        """
-        import re
-
-        # Try to find JSON in code blocks
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
-        if json_match:
-            text = json_match.group(1)
-
-        # Clean up
+        m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if m:
+            text = m.group(1)
+        m2 = re.search(r'(\{.*\})', text, re.DOTALL)
+        if m2:
+            text = m2.group(1)
         text = text.strip()
-
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            # Try to fix common issues
-            text = text.replace("'", '"')
+            text = re.sub(r',\s*([}\]])', r'\1', text.replace("'", '"'))
             try:
                 return json.loads(text)
             except json.JSONDecodeError:
                 return {
                     "pass": False,
-                    "reason": f"Failed to parse judge response: {text[:200]}",
+                    "reason": f"Parse error: {text[:200]}",
                     "score": 0,
                 }

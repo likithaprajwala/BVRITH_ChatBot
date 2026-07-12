@@ -4,6 +4,7 @@ Conversational chatbot module for BVRIT RAG Chatbot.
 Manages conversation history and provides an interactive chat interface.
 """
 
+import re
 import logging
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -15,6 +16,25 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# ── Greeting patterns ──────────────────────────────────────────────────────────
+_GREETING_PATTERNS = re.compile(
+    r"^\s*("
+    r"hi|hello|hey|hiya|howdy|"
+    r"good\s*morning|good\s*afternoon|good\s*evening|good\s*night|"
+    r"greetings|sup|what'?s\s*up|yo|"
+    r"namaste|namaskar|hai|helo|hii|hiii|"
+    r"morning|afternoon|evening"
+    r")\s*[!?.]*\s*$",
+    re.IGNORECASE,
+)
+
+_GREETING_RESPONSE = (
+    "Hello! 👋 Welcome to the **BVRIT College FAQ Assistant**.\n\n"
+    "I can help you with information about BVRIT Hyderabad College of Engineering for Women — "
+    "departments, admissions, fee structure, placements, facilities, faculty, and more.\n\n"
+    "How can I help you today? 😊"
+)
 
 
 class Chatbot:
@@ -32,6 +52,10 @@ class Chatbot:
         self.rag_pipeline: RAGPipeline = RAGPipeline(top_k=top_k)
         self.conversation_history: List[Tuple[str, str]] = []
         logger.info(f"Chatbot initialized with top_k={top_k}")
+
+    def _is_greeting(self, text: str) -> bool:
+        """Return True if the message is purely a greeting."""
+        return bool(_GREETING_PATTERNS.match(text.strip()))
 
     def clear_history(self) -> None:
         """Clear the conversation history."""
@@ -64,9 +88,24 @@ class Chatbot:
         Returns:
             Dictionary with answer, citations, and metadata.
         """
+        import time
         logger.info(f"User question: '{question[:50]}...'")
 
-        # Get response from RAG pipeline
+        # ── Short-circuit: handle greetings without RAG ──────────────────────
+        if self._is_greeting(question):
+            logger.info("Greeting detected — returning canned response")
+            self.conversation_history.append((question, _GREETING_RESPONSE))
+            return {
+                "answer": _GREETING_RESPONSE,
+                "citations": [],
+                "retrieved_chunk_count": 0,
+                "latency": 0.0,
+                "retrieved_sections": [],
+                "retrieved_chunks": [],
+                "is_refusal": False,
+            }
+
+        # ── Normal RAG path ──────────────────────────────────────────────────
         result = self.rag_pipeline.query(
             question=question,
             section=section,

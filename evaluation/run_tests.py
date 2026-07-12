@@ -198,6 +198,23 @@ class TestExecutor:
         logger.info(f"Executing {len(test_cases)} test cases...")
         results = []
 
+        # ── Validate API key with a cheap probe before running all tests ──
+        try:
+            probe = self.chatbot.ask(question="hi")
+            if str(probe.get("answer", "")).startswith("Error:"):
+                err = probe["answer"]
+                logger.error(f"API key validation failed: {err}")
+                raise RuntimeError(
+                    f"Cannot run evaluation — API error on probe: {err}\n"
+                    "Please check your OPENROUTER_API_KEY in the .env file and ensure you have credits."
+                )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"API key validation failed: {e}")
+        finally:
+            self.chatbot.clear_history()
+
         for i, tc in enumerate(test_cases):
             logger.info(f"[{i+1}/{len(test_cases)}] Running test {tc.get('id', 'TC_???')}...")
 
@@ -214,7 +231,8 @@ class TestExecutor:
         # Compute RAGAS metrics
         ragas_scores = self.ragas_evaluator.evaluate(results)
 
-        # Save results
+        # Only save if the run is valid (not mostly API errors)
+        from evaluation.utils import save_results, save_ragas_scores, _is_valid_results
         output = {
             "test_results": results,
             "ragas_scores": ragas_scores,
@@ -227,11 +245,12 @@ class TestExecutor:
             }
         }
 
-        save_results(output)
-
-        # Save RAGAS scores separately
-        from evaluation.utils import save_ragas_scores
-        save_ragas_scores(ragas_scores)
+        if _is_valid_results(output):
+            save_results(output)
+            save_ragas_scores(ragas_scores)
+            logger.info("Results saved successfully.")
+        else:
+            logger.warning("Skipping save — run contains mostly API errors. Previous good results preserved.")
 
         return results
 

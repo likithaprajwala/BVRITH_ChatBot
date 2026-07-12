@@ -139,7 +139,7 @@ class RAGASEvaluator:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.0,
-                max_tokens=512,
+                max_tokens=400,
             )
             result_text = response.choices[0].message.content.strip()
 

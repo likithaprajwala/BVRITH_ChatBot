@@ -229,20 +229,70 @@ def detect_section(text: str) -> str:
     text_lower = text.lower()
 
     section_keywords = {
-        "About": ["about bvrit", "about the college", "vision", "mission", "introduction", "overview"],
-        "Departments": ["department", "cse", "ece", "eee", "mech", "civil", "engineering"],
-        "Admissions": ["admission", "eligibility", "entrance", "jee", "eamcet", "apply", "seat"],
-        "Fee Structure": ["fee", "tuition", "cost", "payment", "scholarship"],
-        "Placements": ["placement", "recruit", "company", "offer", "package", "career"],
-        "Facilities": ["facility", "library", "lab", "hostel", "cafeteria", "transport", "sports"],
-        "Faculty": ["faculty", "professor", "teacher", "staff", "phd"],
-        "Contact": ["contact", "email", "phone", "address", "website"],
+        "About": [
+            "about bvrit", "about the college", "vision", "mission",
+            "introduction", "overview", "established", "founded", "history",
+            "bvrit hyderabad", "sri vishnu", "k v vishnu raju", "nirf",
+            "nba accreditation", "about bvrith", "where women thrive",
+            "empower women", "youngest college",
+        ],
+        "Departments": [
+            "department", "b.tech", "btech", "m.tech", "mtech",
+            "computer science", "cse", "electronics", "ece", "eee",
+            "electrical", "information technology", " it ", "civil",
+            "mechanical", "data science", "ai&ml", "artificial intelligence",
+            "intake", "seats", "r&d", "research", "alumni",
+        ],
+        "Admissions": [
+            "admission", "eligibility", "entrance", "jee", "eamcet",
+            "tseamcet", "apply", "seat matrix", "application",
+            "under graduate", "post graduate", "ug", "pg", "lateral entry",
+            "admission process", "how to join",
+        ],
+        "Fee Structure": [
+            "fee", "fees", "tuition fee", "nba fee", "jntuh", "misc",
+            "cost", "payment", "annual", "semester", "fee details",
+            "fee structure", "b-category", "management quota",
+            "2025 batch", "2024 batch", "branch", "₹", "lakh",
+        ],
+        "Placements": [
+            "placement", "recruit", "company", "companies", "package",
+            "salary", "lpa", "ctc", "campus placement", "placed",
+            "training", "t&p", "microsoft", "amazon", "google", "infosys",
+            "tcs", "wipro", "capgemini", "accenture", "cognizant",
+            "offer letter", "highest package", "placement team",
+        ],
+        "Facilities": [
+            "facilit", "library", "lab", "laboratory", "hostel",
+            "cafeteria", "canteen", "transport", "sports", "gym",
+            "wifi", "internet", "infrastructure", "yoga", "wellness",
+            "medical", "health", "nss", "ncc", "cultural", "auditorium",
+            "seminar hall", "playground",
+        ],
+        "Faculty": [
+            "faculty", "professor", "teacher", "staff", "lecturer",
+            "phd", "principal", "hod", "head of department",
+            "dr.", "mrs.", "mr.", "ms.", "associate professor",
+            "assistant professor", "visiting faculty",
+        ],
+        "Contact": [
+            "contact", "address", "phone", "email", "website",
+            "location", "how to reach", "map", "bvrit.ac.in",
+            "bvrithyderabad", "nizampet", "hyderabad", "telangana",
+            "pin code", "postal", "helpline",
+        ],
     }
 
+    # Score each section by counting keyword hits
+    scores = {section: 0 for section in section_keywords}
     for section, keywords in section_keywords.items():
-        for keyword in keywords:
-            if keyword in text_lower:
-                return section
+        for kw in keywords:
+            if kw in text_lower:
+                scores[section] += 1
+
+    best_section = max(scores, key=lambda s: scores[s])
+    if scores[best_section] > 0:
+        return best_section
 
     return "General"
 

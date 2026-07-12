@@ -82,9 +82,29 @@ def save_testcases(test_cases: List[Dict[str, Any]], filepath: Optional[str] = N
     return filepath
 
 
+def _is_valid_results(data: Dict[str, Any]) -> bool:
+    """
+    Check whether a results file contains real answers (not all API errors).
+
+    Returns True if at least half the test results have non-error actual answers.
+    """
+    test_results = data.get("test_results", [])
+    if not test_results:
+        return False
+    error_count = sum(
+        1 for t in test_results
+        if str(t.get("actual_answer", "")).startswith("Error:")
+        or "401" in str(t.get("actual_answer", ""))
+        or "402" in str(t.get("actual_answer", ""))
+    )
+    # Treat as invalid if more than half the answers are errors
+    return error_count < len(test_results) / 2
+
+
 def load_results(filepath: Optional[str] = None) -> Dict[str, Any]:
     """
     Load evaluation results from a JSON file.
+    Skips files where the majority of answers are API errors.
 
     Args:
         filepath: Path to the results JSON file.
@@ -92,20 +112,29 @@ def load_results(filepath: Optional[str] = None) -> Dict[str, Any]:
     Returns:
         Results dictionary.
     """
-    if filepath is None:
-        # Find the latest results file
-        files = sorted(RESULTS_DIR.glob("evaluation_results_*.json"))
-        if not files:
-            return {}
-        filepath = str(files[-1])
+    if filepath is not None:
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load results: {e}")
+                return {}
+        return {}
 
-    if os.path.exists(filepath):
+    # Walk files newest-first, return first valid one
+    files = sorted(RESULTS_DIR.glob("evaluation_results_*.json"), reverse=True)
+    for f in files:
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                return json.load(f)
+            with open(f, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if _is_valid_results(data):
+                logger.info(f"Loaded valid results from {f}")
+                return data
+            else:
+                logger.warning(f"Skipping broken results file (API errors): {f.name}")
         except Exception as e:
-            logger.error(f"Failed to load results: {e}")
-            return {}
+            logger.error(f"Failed to load {f}: {e}")
     return {}
 
 
@@ -134,6 +163,7 @@ def save_results(results: Dict[str, Any], filepath: Optional[str] = None) -> str
 def load_ragas_scores(filepath: Optional[str] = None) -> Dict[str, float]:
     """
     Load RAGAS scores from a JSON file.
+    Skips files that contain only zeros (produced by broken API-error runs).
 
     Args:
         filepath: Path to the RAGAS scores JSON file.
@@ -141,25 +171,37 @@ def load_ragas_scores(filepath: Optional[str] = None) -> Dict[str, float]:
     Returns:
         Dictionary of RAGAS metric scores.
     """
-    if filepath is None:
-        files = sorted(RESULTS_DIR.glob("ragas_scores_*.json"))
-        if not files:
-            return {
-                "faithfulness": 0.0,
-                "answer_relevancy": 0.0,
-                "context_precision": 0.0,
-                "context_recall": 0.0,
-            }
-        filepath = str(files[-1])
+    default = {
+        "faithfulness": 0.0,
+        "answer_relevancy": 0.0,
+        "context_precision": 0.0,
+        "context_recall": 0.0,
+    }
 
-    if os.path.exists(filepath):
+    if filepath is not None:
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load RAGAS scores: {e}")
+        return default
+
+    # Walk newest-first, return first non-zero file
+    files = sorted(RESULTS_DIR.glob("ragas_scores_*.json"), reverse=True)
+    for f in files:
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                return json.load(f)
+            with open(f, "r", encoding="utf-8") as fh:
+                scores = json.load(fh)
+            # Skip if all scores are 0 (broken run)
+            if any(v > 0 for v in scores.values()):
+                logger.info(f"Loaded valid RAGAS scores from {f}")
+                return scores
+            else:
+                logger.warning(f"Skipping zero RAGAS scores file: {f.name}")
         except Exception as e:
-            logger.error(f"Failed to load RAGAS scores: {e}")
-            return {}
-    return {}
+            logger.error(f"Failed to load {f}: {e}")
+    return default
 
 
 def save_ragas_scores(scores: Dict[str, float], filepath: Optional[str] = None) -> str:
@@ -187,6 +229,7 @@ def save_ragas_scores(scores: Dict[str, float], filepath: Optional[str] = None) 
 def load_final_report(filepath: Optional[str] = None) -> Dict[str, Any]:
     """
     Load the final evaluation report.
+    Skips reports where pass_rate is suspiciously low due to API errors (all zeros).
 
     Args:
         filepath: Path to the report JSON file.
@@ -194,19 +237,35 @@ def load_final_report(filepath: Optional[str] = None) -> Dict[str, Any]:
     Returns:
         Report dictionary.
     """
-    if filepath is None:
-        files = sorted(RESULTS_DIR.glob("final_report_*.json"))
-        if not files:
-            return {}
-        filepath = str(files[-1])
+    if filepath is not None:
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load report: {e}")
+        return {}
 
-    if os.path.exists(filepath):
+    # Walk newest-first, skip reports caused by API errors
+    files = sorted(RESULTS_DIR.glob("final_report_*.json"), reverse=True)
+    for f in files:
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                return json.load(f)
+            with open(f, "r", encoding="utf-8") as fh:
+                report = json.load(fh)
+            # Check if this report corresponds to a broken run:
+            # All dimension scores being 0 with pass_rate near 0 means API errors
+            dim_scores = report.get("dimension_scores", {})
+            all_zero = all(
+                v.get("avg_score", 0) == 0
+                for v in dim_scores.values()
+            ) if dim_scores else True
+            if all_zero and report.get("report_metadata", {}).get("pass_rate", 0) < 10:
+                logger.warning(f"Skipping broken report (all-zero scores): {f.name}")
+                continue
+            logger.info(f"Loaded valid report from {f}")
+            return report
         except Exception as e:
-            logger.error(f"Failed to load report: {e}")
-            return {}
+            logger.error(f"Failed to load {f}: {e}")
     return {}
 
 

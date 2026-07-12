@@ -115,7 +115,7 @@ class TestGenerator:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.7,
-                max_tokens=4096,
+                max_tokens=3000,
             )
             result_text = response.choices[0].message.content.strip()
 

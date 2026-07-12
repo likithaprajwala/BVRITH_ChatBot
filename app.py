@@ -49,7 +49,7 @@ CUSTOM_CSS = """
     
     .block-container { padding: 0 !important; max-width: 100% !important; }
     .main .block-container {
-        padding-top: 80px !important;
+        padding-top: 72px !important;
         padding-left: 40px !important;
         padding-right: 40px !important;
         max-width: 1440px !important;
@@ -177,6 +177,7 @@ CUSTOM_CSS = """
     .eval-label { font-size: 12px; color: #6B7280; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
     .eval-big { font-size: 36px; font-weight: 800; line-height: 1.2; }
     .eval-dim-card { background: #111318; border: 1px solid #1E2028; border-radius: 14px; padding: 20px; margin-bottom: 16px; }
+    .eval-dim-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
     .eval-dim-id { font-size: 10px; font-weight: 700; color: #4B5563; letter-spacing: 1.5px; }
     .eval-dim-badge { padding: 2px 10px; border-radius: 100px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
     .badge-pass { background: rgba(34, 197, 94, 0.15); color: #22C55E; border: 1px solid rgba(34, 197, 94, 0.3); }
@@ -243,7 +244,7 @@ CUSTOM_CSS = """
 
 def init_state():
     if "page" not in st.session_state: st.session_state.page = "Home"
-    if "chatbot" not in st.session_state: st.session_state.chatbot = Chatbot(top_k=5)
+    if "chatbot" not in st.session_state: st.session_state.chatbot = Chatbot(top_k=8)
     if "messages" not in st.session_state: st.session_state.messages = []
     if "vs_loaded" not in st.session_state: st.session_state.vs_loaded = False
     if "chunk_count" not in st.session_state: st.session_state.chunk_count = 0
@@ -513,6 +514,19 @@ def render_eval():
                 progress.progress(100)
                 status.success(f"Complete! Pass rate: {report['summary']['pass_rate']}%")
                 st.session_state.eval_done = True
+            except RuntimeError as e:
+                err_msg = str(e)
+                if "401" in err_msg or "API" in err_msg or "key" in err_msg.lower():
+                    status.error(
+                        "⚠️ **API Key Error** — Cannot run evaluation.\n\n"
+                        "Your OpenRouter API key is invalid or you have no credits.\n\n"
+                        "**Fix:** Go to [openrouter.ai/keys](https://openrouter.ai/keys) to get a new key, "
+                        "add credits at [openrouter.ai/settings/credits](https://openrouter.ai/settings/credits), "
+                        "then update `OPENROUTER_API_KEY` in your `.env` file and restart the app.\n\n"
+                        "The dashboard below shows your last successful evaluation results."
+                    )
+                else:
+                    status.error(f"Error: {e}")
             except Exception as e:
                 status.error(f"Error: {e}")
             st.session_state.eval_running = False
@@ -562,7 +576,7 @@ def render_eval():
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:28px;">
         <div class="eval-card">
             <div class="eval-label">Weakest Dimension</div>
-            <div style="font-size:36px;font-weight:800;margin-bottom:4px;"><span style="background:linear-gradient(135deg,#FF8A3D,#FF4FCB,#8B5CF6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">{wd_score*10:.0f} {wd_name}</span></div>
+            <div style="font-size:36px;font-weight:800;margin-bottom:4px;"><span style="background:linear-gradient(135deg,#FF8A3D,#FF4FCB,#8B5CF6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">{wd_score:.1f}/10 — {wd_name}</span></div>
             <p style="font-size:13px;color:#9CA3AF;line-height:1.6;">{wd_name} scored lowest. Review chunking and prompt engineering.</p>
         </div>
         <div class="eval-card">
@@ -594,7 +608,10 @@ def render_eval():
             with cols[i]:
                 st.markdown(f"""
                 <div class="eval-dim-card">
-                    <div class="eval-dim-header"><span class="eval-dim-id">DIM {ALL_DIMENSIONS.index(dim)+1:02d}</span><span class="eval-dim-badge {badge}">{badge_text}</span></div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                        <span class="eval-dim-id">DIM {ALL_DIMENSIONS.index(dim)+1:02d}</span>
+                        <span class="eval-dim-badge {badge}">{badge_text}</span>
+                    </div>
                     <div class="eval-dim-name">{dim}</div>
                     <div class="eval-dim-sub">{dpass}/{dtotal} passed · Score: {avg}/10</div>
                     <div class="bar-bg"><div class="bar-fill {bar_color}" style="width:{dpct}%;"></div></div>
@@ -602,23 +619,60 @@ def render_eval():
                 </div>
                 """, unsafe_allow_html=True)
 
-    st.markdown("<div style='display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:28px 0;'>", unsafe_allow_html=True)
+    # Bar chart - dimension scores
     df_data = [{"Dimension": dim, "Score": dim_scores.get(dim, {}).get("avg_score", 0)} for dim in ALL_DIMENSIONS]
     import pandas as pd
     import plotly.express as px
     df = pd.DataFrame(df_data)
-    fig = px.bar(df, x="Dimension", y="Score", color="Dimension", color_discrete_map={"Functional":"#FF8A3D","Quality":"#22C55E","Safety":"#F97316","Security":"#EF4444","Robustness":"#8B5CF6","Performance":"#06B6D4","Context":"#F97316","RAGAS":"#8B5CF6"}, text="Score", height=320)
+    DIM_COLORS = {
+        "Functional": "#FF8A3D",
+        "Quality": "#22C55E",
+        "Safety": "#F97316",
+        "Security": "#EF4444",
+        "Robustness": "#8B5CF6",
+        "Performance": "#06B6D4",
+        "Context": "#FBBF24",
+        "RAGAS": "#EC4899",
+    }
+    fig = px.bar(
+        df, x="Dimension", y="Score",
+        color="Dimension",
+        color_discrete_map=DIM_COLORS,
+        text="Score", height=340,
+    )
     fig.update_traces(texttemplate='%{text:.1f}', textposition='outside')
-    fig.update_layout(showlegend=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", yaxis_range=[0,12], margin=dict(l=0,r=0,t=0,b=0), font=dict(color="#9CA3AF", size=11))
+    fig.update_layout(
+        showlegend=False,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        yaxis_range=[0, 12],
+        margin=dict(l=0, r=0, t=20, b=0),
+        font=dict(color="#9CA3AF", size=11),
+    )
     st.plotly_chart(fig, use_container_width=True, key="eval_bar")
 
+    # Donut chart - pass/fail
     import plotly.graph_objects as go
     if passed + failed > 0:
-        fig2 = go.Figure(data=[go.Pie(labels=["Passed","Failed"], values=[passed,failed], marker=dict(colors=["#22C55E","#EF4444"]), hole=0.7, textinfo="none")])
-        fig2.add_annotation(text=f"{pass_rate}%<br><span style='font-size:12px;color:#6B7280;'>PASS RATE</span>", showarrow=False, font=dict(size=28, color="#FFF"))
-        fig2.update_layout(showlegend=False, height=320, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=0,r=0,t=0,b=0))
+        fig2 = go.Figure(data=[go.Pie(
+            labels=["Passed", "Failed"],
+            values=[passed, failed],
+            marker=dict(colors=["#22C55E", "#EF4444"]),
+            hole=0.7,
+            textinfo="none",
+        )])
+        fig2.add_annotation(
+            text=f"{pass_rate}%<br><span style='font-size:12px;color:#6B7280;'>PASS RATE</span>",
+            showarrow=False,
+            font=dict(size=28, color="#FFF"),
+        )
+        fig2.update_layout(
+            showlegend=False, height=300,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=0, r=0, t=0, b=0),
+        )
         st.plotly_chart(fig2, use_container_width=True, key="eval_donut")
-    st.markdown("</div>", unsafe_allow_html=True)
 
     failed_tests = [t for t in test_results if not t.get("pass")]
     if failed_tests:
@@ -646,19 +700,14 @@ def main():
 
     current = st.session_state.page
 
-    # ── FIXED HEADER: Navbar + Tabs ──
-    home_active = "active" if current == "Home" else ""
-    chat_active = "active" if current == "Chat" else ""
-    eval_active = "active" if current == "Eval" else ""
-
-    # ── SIMPLE FIXED NAVBAR ──
+    # ── FIXED BRAND BAR (52 px, brand only — tabs are below in native Streamlit) ──
     st.markdown("""
-    <div class="fixed-header">
-        <div class="header-top" style="height:56px;">
+    <div class="fixed-header" style="height:52px;">
+        <div class="header-top" style="height:52px;">
             <div class="header-logo-left">
                 <div class="header-logo" style="width:28px;height:28px;font-size:14px;">B</div>
                 <span class="header-brand" style="font-size:15px;">BVRITH</span>
-                <span style="color:#6B7280;font-weight:500;font-size:12px;margin-left:2px;">FAQ</span>
+                <span style="color:#6B7280;font-weight:500;font-size:12px;margin-left:4px;">FAQ</span>
                 <span class="header-brand-sub" style="font-size:10px;">RAG ASSISTANT</span>
             </div>
             <div class="header-right-btn" style="padding:5px 14px;font-size:11px;">🔗 bvrit.ac.in</div>
@@ -666,7 +715,8 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # ── TAB BAR (below fixed header, visible) ──
+    # ── TAB BAR — rendered as Streamlit columns, sits just below the fixed bar ──
+    st.markdown("<div style='margin-top:4px;margin-bottom:8px;'>", unsafe_allow_html=True)
     t1, t2, t3 = st.columns([1, 1, 1])
     with t1:
         if st.button("🏠 Home", key="nav_home", use_container_width=True,
@@ -680,8 +730,9 @@ def main():
         if st.button("📊 Eval", key="nav_eval", use_container_width=True,
                      type="primary" if current == "Eval" else "secondary"):
             st.session_state.page = "Eval"; st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
     # ── MAIN CONTENT ──
     if st.session_state.page == "Home":
